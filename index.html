@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="GEO-PIROFUGA: ruteo de evacuación por incendios forestales en el Gran Valparaíso">
+<title>GEO-PIROFUGA | Ruta a zona segura</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🔥%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+  html, body { height: 100%; margin: 0; font: 14px/1.4 system-ui, Segoe UI, Roboto, sans-serif; }
+  #map { position: absolute; inset: 0; background: #e8ecef; }
+  #panel {
+    position: absolute; top: 10px; right: 10px; z-index: 1000; width: 320px;
+    max-height: calc(100% - 20px); overflow: auto; box-sizing: border-box;
+    background: rgba(255,255,255,.96); border-radius: 10px; padding: 12px 14px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.25); color: #1f2933;
+  }
+  #panel h1 { font-size: 15px; margin: 0 0 6px; }
+  #panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #6b7280; margin: 12px 0 4px; }
+  .muted { color: #6b7280; font-size: 12px; }
+  .paso { margin: 2px 0; }
+  .paso.ok { color: #0a7d32; }
+  .paso.ok::before { content: "✔ "; }
+  .paso:not(.ok)::before { content: "○ "; color: #9ca3af; }
+  label { display: block; margin-top: 6px; font-size: 13px; }
+  input[type=range] { width: 100%; }
+  button { margin-top: 8px; margin-right: 4px; padding: 6px 10px; border: 1px solid #cbd2d9; border-radius: 6px; background: #f5f7fa; cursor: pointer; }
+  button:hover { background: #e4e7eb; }
+  .res { border-left: 5px solid #999; padding: 4px 8px; margin: 6px 0; background: #f8fafc; border-radius: 0 6px 6px 0; font-size: 13px; }
+  .warn { color: #b45309; }
+  .sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; vertical-align: -1px; margin-right: 3px; }
+  .pin {
+    width: 28px; height: 28px; border-radius: 50%; color: #fff; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    border: 2px solid #fff; box-shadow: 0 1px 5px rgba(0,0,0,.45); font-size: 14px;
+  }
+  #cargando {
+    position: absolute; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center;
+    background: rgba(255,255,255,.75); font-size: 15px; color: #1f2933; transition: opacity .3s;
+  }
+  #cargando.fuera { opacity: 0; pointer-events: none; }
+  @media (max-width: 600px) { #panel { width: auto; left: 10px; max-height: 45%; top: auto; bottom: 10px; } }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="cargando">Cargando red vial y zonas seguras…</div>
+
+<div id="panel">
+  <h1>GEO-PIROFUGA · Ruta a zona segura</h1>
+  <div id="estado" class="muted">Cargando datos desde <code>data/</code>…</div>
+
+  <div id="cargador" style="display:none">
+    <label>Selecciona los 2 GeoJSON a la vez:
+      <input id="archivos" type="file" accept=".geojson,.json" multiple>
+    </label>
+    <div class="muted">
+      <code>red_evacuacion_dinamica.geojson</code> y
+      <code>zonas_seguras_todas.geojson</code>
+    </div>
+  </div>
+
+  <h2>Acción al hacer clic en el mapa</h2>
+  <label><input type="radio" name="modo" value="puntos" checked> Colocar puntos (A, B, incendio)</label>
+  <label><input type="radio" name="modo" value="zona"> Elegir zona segura de destino</label>
+
+  <div id="p-A" class="paso">Origen A</div>
+  <div id="p-B" class="paso">Origen B</div>
+  <div id="p-F" class="paso">Punto de incendio 🔥</div>
+  <div class="muted">Los marcadores se pueden arrastrar para recalcular.</div>
+
+  <h2>Zona segura de destino</h2>
+  <div id="zona-sel" class="muted">Automática: la zona conectada a la red con menor costo.</div>
+  <button id="quitar-zona" style="display:none">Volver a destino automático</button>
+  <div class="muted" style="margin-top:6px">
+    <span class="sw" style="background:#2f9e44"></span>conectada a la red (≤ 300 m)
+    <span class="sw" style="background:#f59f00;margin-left:8px"></span>lejos de la red
+  </div>
+
+  <h2>Incendio</h2>
+  <label>Radio de bloqueo: <b id="v-rb">150</b> m
+    <input id="rb" type="range" min="50" max="1000" step="25" value="150"></label>
+  <label>Radio de influencia: <b id="v-ri">600</b> m
+    <input id="ri" type="range" min="200" max="3000" step="50" value="600"></label>
+  <button id="reset">Reiniciar puntos</button>
+  <button id="copiar">Copiar enlace del escenario</button>
+
+  <h2>Resultados</h2>
+  <div id="resultados" class="muted">Ubica al menos un origen.</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+/* =============================================================================
+   Estructura del repositorio:
+     index.html
+     data/red_evacuacion_dinamica.geojson   (LineString: longitud_m, Indice_Fuego,
+                                             Factor_Congestion, Peso_Trafico)
+     data/zonas_seguras_todas.geojson       (Polygon: id_zona, Aforo_Personas, Area_m2)
+   Costo del tramo = longitud * (1 + Indice_Fuego/100 + Factor_Congestion*Peso_Trafico)
+   El escenario (A, B, incendio, zona, radios) se guarda en el hash de la URL.
+   ============================================================================= */
+const CFG = {
+  datos: ["data/red_evacuacion_dinamica.geojson", "data/zonas_seguras_todas.geojson"],
+  cell: 300,            // celda del índice espacial (m)
+  maxAccesoM: 300,      // zona "conectada" si está a <= 300 m de un nodo vial
+  bloqFactor: 1000,     // multiplicador de costo en tramos bloqueados
+  colores: ["#1971c2", "#9c36b5"]
+};
+
+// ---------- Estado ----------
+let nodes = [], nodeXY = [], adj = [], edges = [], grid = new Map(), costoBase = new Float64Array(0);
+let zonas = [], zonaPorNodo = new Map(), destTodos = new Set(), zonaSel = null;
+let fcRed = null, fcZonas = null, redListo = false, modo = "puntos";
+let lon0 = 0, lat0 = 0, kx = 1;
+const ky = 110540;
+const mk = { A: null, B: null, F: null };
+
+// ---------- Mapa y bases Esri ----------
+const esri = (svc, opts = {}) => L.tileLayer(
+  `https://server.arcgisonline.com/ArcGIS/rest/services/${svc}/MapServer/tile/{z}/{y}/{x}`,
+  Object.assign({ maxZoom: 19, attribution: "Tiles &copy; Esri &mdash; Esri, HERE, Garmin, USGS, NGA" }, opts));
+
+const bases = {
+  "Esri · Calles": esri("World_Street_Map"),
+  "Esri · Imágenes satelitales": esri("World_Imagery"),
+  "Esri · Topográfico": esri("World_Topo_Map"),
+  "Esri · Gris claro": esri("Canvas/World_Light_Gray_Base", { maxNativeZoom: 16 })
+};
+const etiquetas = esri("Reference/World_Boundaries_and_Places");
+
+const map = L.map("map", { preferCanvas: true, layers: [bases["Esri · Calles"]] })
+  .setView([-33.03, -71.55], 11);
+
+const capaRed = L.layerGroup().addTo(map);
+const capaZonas = L.layerGroup().addTo(map);
+const capaFuego = L.layerGroup().addTo(map);
+const capaSel = L.layerGroup().addTo(map);
+const capaDest = L.layerGroup().addTo(map);
+const capaRutas = L.layerGroup().addTo(map);
+
+L.control.layers(bases, {
+  "Red vial": capaRed, "Zonas seguras": capaZonas, "Etiquetas (Esri)": etiquetas
+}, { position: "topleft" }).addTo(map);
+
+const $ = id => document.getElementById(id);
+const fmt = n => Math.round(n).toLocaleString("es-CL");
+const km = m => (m / 1000).toFixed(2) + " km";
+const estado = t => { $("estado").innerHTML = t; };
+const proj = (lon, lat) => [(lon - lon0) * kx, (lat - lat0) * ky];
+
+let _tmr = null;
+const recalcularDiferido = () => { clearTimeout(_tmr); _tmr = setTimeout(recalcular, 60); };
+
+// ---------- Cola de prioridad ----------
+class MinHeap {
+  constructor() { this.k = []; this.v = []; }
+  get size() { return this.k.length; }
+  _sw(i, j) {
+    [this.k[i], this.k[j]] = [this.k[j], this.k[i]];
+    [this.v[i], this.v[j]] = [this.v[j], this.v[i]];
+  }
+  push(key, val) {
+    let i = this.k.length; this.k.push(key); this.v.push(val);
+    while (i > 0) { const p = (i - 1) >> 1; if (this.k[p] <= this.k[i]) break; this._sw(i, p); i = p; }
+  }
+  pop() {
+    const k0 = this.k[0], v0 = this.v[0];
+    const lk = this.k.pop(), lv = this.v.pop();
+    if (this.k.length) {
+      this.k[0] = lk; this.v[0] = lv;
+      let i = 0; const n = this.k.length;
+      while (true) {
+        const l = 2 * i + 1, r = l + 1; let m = i;
+        if (l < n && this.k[l] < this.k[m]) m = l;
+        if (r < n && this.k[r] < this.k[m]) m = r;
+        if (m === i) break; this._sw(i, m); i = m;
+      }
+    }
+    return [k0, v0];
+  }
+}
+
+// ---------- Geometría auxiliar ----------
+function distSeg(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+function distEdge(e, fx, fy) {
+  let m = Infinity;
+  for (let i = 0; i < e.xy.length - 1; i++) {
+    const d = distSeg(fx, fy, e.xy[i][0], e.xy[i][1], e.xy[i + 1][0], e.xy[i + 1][1]);
+    if (d < m) m = d;
+  }
+  return m;
+}
+function pip(x, y, ring) {
+  let dentro = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) dentro = !dentro;
+  }
+  return dentro;
+}
+function distRing(x, y, ring) {
+  let m = Infinity;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const d = distSeg(x, y, ring[i][0], ring[i][1], ring[i + 1][0], ring[i + 1][1]);
+    if (d < m) m = d;
+  }
+  return m;
+}
+function bboxDe(puntos) {
+  let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;   // sin spread: seguro con muchos vértices
+  for (const p of puntos) {
+    if (p[0] < a) a = p[0]; if (p[1] < b) b = p[1];
+    if (p[0] > c) c = p[0]; if (p[1] > d) d = p[1];
+  }
+  return [a, b, c, d];
+}
+function largoCoords(c) {
+  let s = 0;
+  for (let i = 0; i < c.length - 1; i++) {
+    const dx = (c[i + 1][0] - c[i][0]) * 111320 * Math.cos(c[i][1] * Math.PI / 180);
+    const dy = (c[i + 1][1] - c[i][1]) * ky;
+    s += Math.hypot(dx, dy);
+  }
+  return s;
+}
+
+// ---------- Construcción de la red ----------
+function construirRed(fc) {
+  nodes = []; nodeXY = []; adj = []; edges = []; grid = new Map();
+  const mapa = new Map();
+  const nodoId = c => {
+    const k = c[0].toFixed(6) + "," + c[1].toFixed(6);
+    let id = mapa.get(k);
+    if (id === undefined) { id = nodes.length; nodes.push([c[0], c[1]]); adj.push([]); mapa.set(k, id); }
+    return id;
+  };
+
+  for (const f of fc.features) {
+    const g = f.geometry; if (!g) continue;
+    const c = g.type === "LineString" ? g.coordinates
+            : g.type === "MultiLineString" ? g.coordinates.flat() : null;
+    if (!c || c.length < 2) continue;
+    const u = nodoId(c[0]), v = nodoId(c[c.length - 1]);
+    const p = f.properties || {};
+    const idx = edges.length;
+    edges.push({
+      u, v, coords: c,
+      len: p.longitud_m != null && Number.isFinite(+p.longitud_m) ? +p.longitud_m : largoCoords(c),
+      fuego: Number.isFinite(+p.Indice_Fuego) ? +p.Indice_Fuego : 0,
+      fc: Number.isFinite(+p.Factor_Congestion) ? +p.Factor_Congestion : 0,
+      pt: Number.isFinite(+p.Peso_Trafico) ? +p.Peso_Trafico : 1
+    });
+    adj[u].push(idx); if (v !== u) adj[v].push(idx);
+  }
+
+  lon0 = nodes.reduce((s, n) => s + n[0], 0) / nodes.length;
+  lat0 = nodes.reduce((s, n) => s + n[1], 0) / nodes.length;
+  kx = 111320 * Math.cos(lat0 * Math.PI / 180);
+  nodeXY = nodes.map(n => proj(n[0], n[1]));
+  edges.forEach(e => { e.xy = e.coords.map(c => proj(c[0], c[1])); e.bb = bboxDe(e.xy); });
+
+  // Costo base: se calcula una sola vez
+  costoBase = new Float64Array(edges.length);
+  edges.forEach((e, i) => { costoBase[i] = e.len * (1 + e.fuego / 100 + e.fc * e.pt); });
+
+  nodeXY.forEach((p, i) => {
+    const k = Math.floor(p[0] / CFG.cell) + "_" + Math.floor(p[1] / CFG.cell);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  });
+}
+
+function nearestNode(x, y) {
+  const cx = Math.floor(x / CFG.cell), cy = Math.floor(y / CFG.cell);
+  let best = -1, bd = Infinity;
+  for (let r = 0; r < 300; r++) {
+    for (let dx = -r; dx <= r; dx++) {
+      const step = Math.abs(dx) === r ? 1 : 2 * r;
+      for (let dy = -r; dy <= r; dy += step) {
+        const arr = grid.get((cx + dx) + "_" + (cy + dy));
+        if (!arr) continue;
+        for (const i of arr) {
+          const d = Math.hypot(nodeXY[i][0] - x, nodeXY[i][1] - y);
+          if (d < bd) { bd = d; best = i; }
+        }
+      }
+    }
+    if (best >= 0 && bd <= r * CFG.cell) break;
+  }
+  return { id: best, d: bd };
+}
+
+// ---------- Zonas seguras (todas) ----------
+function construirZonas(fc) {
+  zonas = []; zonaPorNodo = new Map(); destTodos = new Set(); zonaSel = null;
+  fc.features.forEach((f, i) => {
+    if (!f.geometry) return;
+    const anillos = f.geometry.type === "Polygon" ? [f.geometry.coordinates[0]]
+                  : f.geometry.type === "MultiPolygon" ? f.geometry.coordinates.map(p => p[0]) : [];
+    const vs = anillos.flat();
+    if (!vs.length) return;
+
+    // Nodo vial más cercano al polígono (muestra de vértices + centroide)
+    const paso = Math.max(1, Math.floor(vs.length / 25));
+    const cand = [];
+    for (let j = 0; j < vs.length; j += paso) cand.push(vs[j]);
+    let sx = 0, sy = 0;
+    for (const c of vs) { sx += c[0]; sy += c[1]; }
+    cand.push([sx / vs.length, sy / vs.length]);
+
+    let best = { id: -1, d: Infinity, c: null };
+    cand.forEach(c => {
+      const [x, y] = proj(c[0], c[1]);
+      const n = nearestNode(x, y);
+      if (n.d < best.d) best = { id: n.id, d: n.d, c };
+    });
+    if (best.id < 0) return;
+
+    const rings = anillos.map(r => r.map(c => proj(c[0], c[1])));
+    const p = f.properties || {};
+    zonas.push({
+      id: p.id_zona ?? i + 1, aforo: p.Aforo_Personas, area: p.Area_m2,
+      nodo: best.id, dAcc: best.d, vtx: best.c, accesible: best.d <= CFG.maxAccesoM,
+      rings, bbox: bboxDe(rings.flat()), feature: f
+    });
+  });
+
+  // Destinos del modo automático: solo zonas conectadas a la red
+  zonas.filter(z => z.accesible).forEach(z => {
+    const prev = zonaPorNodo.get(z.nodo);
+    if (!prev || (z.aforo || z.area || 0) > (prev.aforo || prev.area || 0)) zonaPorNodo.set(z.nodo, z);
+    destTodos.add(z.nodo);
+  });
+}
+
+// Zona bajo el clic (o la más cercana dentro de ~12 px)
+function zonaEnPunto(latlng) {
+  const [x, y] = proj(latlng.lng, latlng.lat);
+  const tol = 12 * 40075016.686 * Math.cos(latlng.lat * Math.PI / 180) / Math.pow(2, map.getZoom() + 8);
+  let mejor = null, bd = Infinity;
+  for (const z of zonas) {
+    const b = z.bbox;
+    if (x < b[0] - tol || x > b[2] + tol || y < b[1] - tol || y > b[3] + tol) continue;
+    let d = 0;
+    if (!z.rings.some(r => pip(x, y, r))) { d = Infinity; for (const r of z.rings) d = Math.min(d, distRing(x, y, r)); }
+    if (d <= tol && d < bd) { bd = d; mejor = z; }
+  }
+  return mejor;
+}
+
+function textoZonaSel() {
+  const z = zonaSel;
+  if (!z) return "Automática: la zona conectada a la red con menor costo.";
+  let t = `<b>Elegida: zona #${z.id}</b>` +
+          (z.aforo != null ? ` · aforo ${fmt(z.aforo)} pers.` : (z.area ? ` · ${fmt(z.area)} m²` : ""));
+  t += `<br>Distancia a la red vial: ${fmt(z.dAcc)} m`;
+  if (!z.accesible) t += `<br><span class="warn">⚠ Lejos de la red: el último tramo sería a pie.</span>`;
+  return t;
+}
+function seleccionarZona(z) {
+  zonaSel = (zonaSel === z) ? null : z;       // clic repetido = deseleccionar
+  capaSel.clearLayers();
+  if (zonaSel) {
+    L.geoJSON(zonaSel.feature, {
+      style: { color: "#111", weight: 3, fillColor: "#fab005", fillOpacity: .75 }, interactive: false
+    }).addTo(capaSel);
+  }
+  $("zona-sel").innerHTML = textoZonaSel();
+  $("quitar-zona").style.display = zonaSel ? "inline-block" : "none";
+  recalcular();
+}
+$("quitar-zona").onclick = () => { if (zonaSel) seleccionarZona(zonaSel); };
+
+// ---------- Dijkstra ----------
+function dijkstra(src, dests, cost) {
+  const n = nodes.length;
+  const dist = new Float64Array(n).fill(Infinity);
+  const prevE = new Int32Array(n).fill(-1);
+  const prevN = new Int32Array(n).fill(-1);
+  const heap = new MinHeap();
+  dist[src] = 0; heap.push(0, src);
+  while (heap.size) {
+    const [d, u] = heap.pop();
+    if (d > dist[u]) continue;
+    if (dests.has(u)) return { dest: u, dist: d, prevE, prevN };
+    for (const ei of adj[u]) {
+      const e = edges[ei];
+      const v = e.u === u ? e.v : e.u;
+      const nd = d + cost[ei];
+      if (nd < dist[v]) { dist[v] = nd; prevE[v] = ei; prevN[v] = u; heap.push(nd, v); }
+    }
+  }
+  return null;
+}
+
+function reconstruir(res, src) {
+  const seq = [];
+  let n = res.dest;
+  while (n !== src) { seq.push({ e: res.prevE[n], from: res.prevN[n] }); n = res.prevN[n]; }
+  seq.reverse();
+  const latlngs = [];
+  for (const s of seq) {
+    const e = edges[s.e];
+    const c = e.u === s.from ? e.coords : e.coords.slice().reverse();
+    c.forEach(p => latlngs.push([p[1], p[0]]));
+  }
+  return { seq, latlngs };
+}
+
+// ---------- Incendio ----------
+function dibujarFuego() {
+  capaFuego.clearLayers();
+  if (!mk.F) return;
+  const ll = mk.F.getLatLng();
+  L.circle(ll, { radius: +$("ri").value, color: "#f08c00", weight: 1, fillOpacity: .12, interactive: false }).addTo(capaFuego);
+  L.circle(ll, { radius: +$("rb").value, color: "#c92a2a", weight: 1, fillOpacity: .3, interactive: false }).addTo(capaFuego);
+}
+
+// ---------- Escenario compartible (hash de la URL) ----------
+function guardarHash() {
+  const p = new URLSearchParams();
+  ["A", "B", "F"].forEach(t => {
+    if (mk[t]) { const l = mk[t].getLatLng(); p.set(t, l.lat.toFixed(5) + "," + l.lng.toFixed(5)); }
+  });
+  if (zonaSel) p.set("z", zonaSel.id);
+  p.set("rb", $("rb").value); p.set("ri", $("ri").value);
+  history.replaceState(null, "", "#" + p.toString());
+}
+function leerHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  ["rb", "ri"].forEach(id => {
+    if (p.has(id) && Number.isFinite(+p.get(id))) { $(id).value = p.get(id); $("v-" + id).textContent = $(id).value; }
+  });
+  ["A", "B", "F"].forEach(t => {
+    if (!p.has(t) || mk[t]) return;
+    const [la, lo] = p.get(t).split(",").map(Number);
+    if (Number.isFinite(la) && Number.isFinite(lo)) ponerMarcador(t, L.latLng(la, lo));
+  });
+  dibujarFuego(); actualizarPasos();
+  if (p.has("z")) {
+    const z = zonas.find(q => String(q.id) === p.get("z"));
+    if (z) { zonaSel = null; seleccionarZona(z); return; }
+  }
+  recalcular();
+}
+$("copiar").onclick = async () => {
+  guardarHash();
+  try { await navigator.clipboard.writeText(location.href); $("copiar").textContent = "¡Enlace copiado!"; }
+  catch { prompt("Copia este enlace:", location.href); }
+  setTimeout(() => { $("copiar").textContent = "Copiar enlace del escenario"; }, 1800);
+};
+
+// ---------- Cálculo de rutas ----------
+function resumen(seq, fuegoEf, bloq) {
+  let d = 0, fp = 0, nb = 0;
+  seq.forEach(s => { const e = edges[s.e]; d += e.len; fp += fuegoEf[s.e] * e.len; if (bloq[s.e]) nb++; });
+  return { dist: d, fuego: d ? fp / d : 0, bloqueados: nb };
+}
+
+function recalcular() {
+  if (!redListo) return;
+  guardarHash();
+  capaRutas.clearLayers(); capaDest.clearLayers();
+  const out = $("resultados"); out.innerHTML = "";
+  const origenes = ["A", "B"].filter(t => mk[t]);
+  if (!origenes.length) { out.textContent = "Ubica al menos un origen."; return; }
+
+  const sel = zonaSel;
+  const destBase = sel ? new Set([sel.nodo]) : destTodos;
+  if (!destBase.size) {
+    out.innerHTML = `<span class="warn">Ninguna zona queda conectada a la red: elige una zona manualmente.</span>`;
+    return;
+  }
+
+  const hayFuego = !!mk.F;
+  let costoF = costoBase;
+  const fuegoEf = Float64Array.from(edges, e => e.fuego);
+  const bloq = new Uint8Array(edges.length);
+  let destF = destBase;
+  const avisos = [];
+
+  if (hayFuego) {
+    const rb = +$("rb").value, ri = Math.max(+$("ri").value, rb + 1);
+    const ll = mk.F.getLatLng();
+    const [fx, fy] = proj(ll.lng, ll.lat);
+    costoF = Float64Array.from(costoBase);
+    edges.forEach((e, i) => {
+      // Descarte rápido por caja envolvente: lejos del radio de influencia no cambia nada
+      const ddx = Math.max(e.bb[0] - fx, 0, fx - e.bb[2]);
+      const ddy = Math.max(e.bb[1] - fy, 0, fy - e.bb[3]);
+      if (Math.hypot(ddx, ddy) >= ri) return;
+
+      const d = distEdge(e, fx, fy);
+      let fg = e.fuego;
+      if (d <= rb) { fg = 100; bloq[i] = 1; costoF[i] = e.len * (2 + e.fc * e.pt) * CFG.bloqFactor; }
+      else {
+        if (d < ri) fg = Math.max(fg, 100 * (1 - (d - rb) / (ri - rb)));
+        costoF[i] = e.len * (1 + fg / 100 + e.fc * e.pt);
+      }
+      fuegoEf[i] = fg;
+    });
+
+    if (sel) {
+      const zd = Math.min(...sel.rings.map(r => distRing(fx, fy, r)));
+      if (zd <= ri) avisos.push(`⚠ La zona elegida está a ${fmt(zd)} m del incendio (dentro del radio de influencia).`);
+    } else {
+      destF = new Set();
+      zonas.filter(z => z.accesible).forEach(z => {
+        if (Math.hypot(nodeXY[z.nodo][0] - fx, nodeXY[z.nodo][1] - fy) > ri) destF.add(z.nodo);
+      });
+      if (!destF.size) { destF = destBase; avisos.push("⚠ Todas las zonas seguras quedan dentro del radio de influencia."); }
+    }
+  }
+
+  origenes.forEach(t => {
+    const ll = mk[t].getLatLng();
+    const [x, y] = proj(ll.lng, ll.lat);
+    const s = nearestNode(x, y);
+    const color = CFG.colores[t === "A" ? 0 : 1];
+    let html = `<div class="res" style="border-color:${color}"><b>Origen ${t}</b>`;
+    if (s.id < 0) { out.innerHTML += html + "<br>Fuera de la red vial.</div>"; return; }
+    if (s.d > 500) html += ` <span class="warn">⚠ a ${fmt(s.d)} m de la red</span>`;
+
+    // Referencia: ruta sin incendio
+    let base = null;
+    if (hayFuego) {
+      const r0 = dijkstra(s.id, destBase, costoBase);
+      if (r0) {
+        base = reconstruir(r0, s.id);
+        L.polyline(base.latlngs, { color: "#6b7280", weight: 4, opacity: .85, dashArray: "6 8", interactive: false }).addTo(capaRutas);
+      }
+    }
+
+    const r = dijkstra(s.id, destF, costoF);
+    if (!r) { out.innerHTML += html + "<br>Sin ruta a la zona de destino.</div>"; return; }
+    const ruta = reconstruir(r, s.id);
+    L.polyline(ruta.latlngs, { color, weight: 5, opacity: .95, interactive: false }).addTo(capaRutas);
+
+    const z = sel || zonaPorNodo.get(r.dest);
+    if (z) {
+      if (!sel) {
+        L.geoJSON(z.feature, { style: { color: "#0a7d32", weight: 3, fillColor: "#2f9e44", fillOpacity: .55 }, interactive: false })
+          .addTo(capaDest);
+      }
+      if (z.dAcc > 5) {   // último tramo: de la red hasta la zona
+        L.polyline([[nodes[r.dest][1], nodes[r.dest][0]], [z.vtx[1], z.vtx[0]]],
+                   { color, weight: 3, dashArray: "2 6", opacity: .9, interactive: false }).addTo(capaRutas);
+      }
+    }
+
+    const st = resumen(ruta.seq, fuegoEf, bloq);
+    html += `<br>Distancia por red: <b>${km(st.dist)}</b> · Costo: ${fmt(r.dist)}`;
+    html += `<br>Índice de fuego medio: ${st.fuego.toFixed(1)}`;
+    if (z) {
+      html += `<br>Destino: zona #${z.id}` +
+        (z.aforo != null ? ` · aforo ${fmt(z.aforo)} pers.` : (z.area ? ` · ${fmt(z.area)} m²` : ""));
+      if (z.dAcc > 5) html += `<br>Último tramo a pie: ${fmt(z.dAcc)} m`;
+    }
+    if (base) {
+      const sb = resumen(base.seq, fuegoEf, bloq);
+      html += `<br><span class="muted">Sin incendio: ${km(sb.dist)}` +
+              (sb.bloqueados ? ` (cruzaría ${sb.bloqueados} tramos bloqueados)` : "") + `</span>`;
+    }
+    if (st.bloqueados) html += `<br><span class="warn">⚠ Atraviesa ${st.bloqueados} tramos dentro del radio de bloqueo (no hay alternativa).</span>`;
+    out.innerHTML += html + "</div>";
+  });
+  avisos.forEach(a => { out.innerHTML += `<div class="warn">${a}</div>`; });
+}
+
+// ---------- Marcadores, pasos y clics ----------
+function mkIcon(txt, color) {
+  return L.divIcon({ className: "", html: `<div class="pin" style="background:${color}">${txt}</div>`,
+                     iconSize: [28, 28], iconAnchor: [14, 14] });
+}
+function ponerMarcador(tipo, latlng) {
+  const [txt, color] = { A: ["A", CFG.colores[0]], B: ["B", CFG.colores[1]], F: ["🔥", "#e03131"] }[tipo];
+  const m = L.marker(latlng, { draggable: true, icon: mkIcon(txt, color), zIndexOffset: 1000 }).addTo(map);
+  m.on("dragend", () => { if (tipo === "F") dibujarFuego(); recalcular(); });
+  mk[tipo] = m;
+}
+function actualizarPasos() {
+  ["A", "B", "F"].forEach(t => $("p-" + t).classList.toggle("ok", !!mk[t]));
+}
+
+document.querySelectorAll('input[name="modo"]').forEach(r =>
+  r.addEventListener("change", e => {
+    modo = e.target.value;
+    map.getContainer().style.cursor = modo === "zona" ? "pointer" : "";
+  }));
+
+map.on("click", e => {
+  if (!redListo) { estado("Primero carga los GeoJSON de la red y las zonas seguras."); return; }
+
+  if (modo === "zona") {
+    const z = zonaEnPunto(e.latlng);
+    if (z) seleccionarZona(z);
+    else $("zona-sel").innerHTML = textoZonaSel() + `<br><span class="muted">No hay una zona segura en ese punto.</span>`;
+    return;
+  }
+
+  const sig = ["A", "B", "F"].find(t => !mk[t]);
+  if (!sig) return;
+  ponerMarcador(sig, e.latlng);
+  if (sig === "F") dibujarFuego();
+  actualizarPasos(); recalcular();
+});
+
+$("reset").onclick = () => {
+  ["A", "B", "F"].forEach(t => { if (mk[t]) { map.removeLayer(mk[t]); mk[t] = null; } });
+  capaFuego.clearLayers(); capaRutas.clearLayers(); capaDest.clearLayers();
+  $("resultados").textContent = "Ubica al menos un origen.";
+  actualizarPasos(); guardarHash();
+};
+["rb", "ri"].forEach(id => $(id).addEventListener("input", () => {
+  $("v-" + id).textContent = $(id).value; dibujarFuego(); recalcularDiferido();
+}));
+
+// ---------- Carga de datos ----------
+function procesarFCs(fcs) {
+  for (const fc of fcs) {
+    const g = ((fc.features || []).find(f => f.geometry) || {}).geometry;
+    const tipo = g ? g.type : "";
+    if (/LineString/.test(tipo)) fcRed = fc;
+    else if (/Polygon/.test(tipo)) fcZonas = fc;
+  }
+  if (!fcRed) { estado("Falta la red vial (GeoJSON de líneas)."); $("cargando").classList.add("fuera"); return; }
+  if (!fcZonas) { estado("Red cargada. Falta el GeoJSON de zonas seguras (polígonos)."); $("cargando").classList.add("fuera"); return; }
+
+  estado("Procesando red y zonas…");
+  setTimeout(() => {
+    construirRed(fcRed);
+    construirZonas(fcZonas);
+    capaSel.clearLayers();
+    $("zona-sel").innerHTML = textoZonaSel();
+    $("quitar-zona").style.display = "none";
+
+    // Dibujo: una sola capa por tipo (mucho más liviano que una capa por zona)
+    capaRed.clearLayers(); capaZonas.clearLayers();
+    L.geoJSON(fcRed, { style: { color: "#475569", weight: 1.3, opacity: .6 }, interactive: false }).addTo(capaRed);
+    const fcOk  = { type: "FeatureCollection", features: zonas.filter(z => z.accesible).map(z => z.feature) };
+    const fcLej = { type: "FeatureCollection", features: zonas.filter(z => !z.accesible).map(z => z.feature) };
+    L.geoJSON(fcOk,  { interactive: false, style: { color: "#2f9e44", weight: 1, fillColor: "#2f9e44", fillOpacity: .3 } }).addTo(capaZonas);
+    L.geoJSON(fcLej, { interactive: false, style: { color: "#e8590c", weight: 1, fillColor: "#f59f00", fillOpacity: .3 } }).addTo(capaZonas);
+
+    const hayHash = /(^|&)(A|B|F)=/.test(location.hash.slice(1));
+    if (!hayHash) map.fitBounds(L.geoJSON(fcRed).getBounds());
+
+    redListo = zonas.length > 0;
+    estado(redListo
+      ? `Red: <b>${fmt(edges.length)}</b> tramos · <b>${fmt(nodes.length)}</b> nodos<br>` +
+        `Zonas seguras: <b>${fmt(zonas.length)}</b> (${fmt(zonas.filter(z => z.accesible).length)} conectadas a la red)`
+      : "El archivo de zonas no tiene polígonos válidos.");
+    $("cargador").style.display = "none";
+    $("cargando").classList.add("fuera");
+    if (redListo) leerHash();
+  }, 30);
+}
+
+async function cargarDesdeArchivos(files) {
+  $("cargando").classList.remove("fuera");
+  try {
+    const fcs = await Promise.all([...files].map(f => f.text().then(JSON.parse)));
+    procesarFCs(fcs);
+  } catch (err) { estado("No pude leer los archivos: " + err.message); $("cargando").classList.add("fuera"); }
+}
+$("archivos").addEventListener("change", e => cargarDesdeArchivos(e.target.files));
+
+(async function init() {
+  try {
+    const fcs = await Promise.all(CFG.datos.map(u =>
+      fetch(u).then(r => { if (!r.ok) throw new Error(r.status + " " + u); return r.json(); })));
+    procesarFCs(fcs);
+  } catch (e) {
+    $("cargando").classList.add("fuera");
+    $("cargador").style.display = "block";
+    estado(location.protocol === "file:"
+      ? "Estás abriendo el archivo localmente (el navegador bloquea <code>data/</code>). Selecciona los GeoJSON manualmente:"
+      : `No pude cargar <code>data/</code> (${e.message}). Revisa que los archivos existan con esos nombres exactos (GitHub distingue mayúsculas). Puedes cargarlos a mano:`);
+  }
+})();
+</script>
+</body>
+</html>
